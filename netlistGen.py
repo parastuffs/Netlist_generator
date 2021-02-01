@@ -112,7 +112,7 @@ def parseLEF(leffile):
     Return:
     -------
     stdCells : dict
-        dictionary of StdCell intances
+        {cell name : StdCell}
     """
 
     stdCells = dict() # Dictionary of Macro objects. Key: macro name.
@@ -146,8 +146,36 @@ def parseLEF(leffile):
             bar()
     return stdCells
 
+def distributionFromFile(inFile):
+    """
+    Input file format:
+    <cell name> <quantity>
 
-def generateNetlist(name, stdCells):
+    Parameters:
+    -----------
+    inFile : str
+        Path to input file.
+
+    Return:
+    -------
+    distribution : dict
+        {cell name : weight}
+    """
+    with open(inFile, 'r') as f:
+        lines = f.readlines()
+    distribution = dict()
+    for line in lines:
+        distribution[line.split()[0]] = float(line.split()[1])
+
+    ###############
+    # Normalisation
+    total = sum(distribution.values())
+    for cell in distribution.keys():
+        distribution[cell] = distribution[cell]/total
+
+    return distribution
+
+def generateNetlist(name, stdCells, distribution):
     """
 
     Parameters:
@@ -155,14 +183,18 @@ def generateNetlist(name, stdCells):
     name : str
         Name of the top module
     stdCells : dict
-        Dictionary of StdCell objects
+        {cell name : StdCell}
+    distribution : dict
+        {cell name : weight}
 
     return Netlist instance
     """
     netlist = Netlist(name)
 
-    for i in range(10):
-        cell = random.choice(list(stdCells.values()))
+    cells = random.choices(list(distribution.keys()), distribution.values(), k=10)
+
+    for i, c in enumerate(cells):
+        cell = stdCells[c]
         name = cell.name.lower() + "_" + str(i)
         instance = Instance(name, cell=cell)
 
@@ -192,7 +224,7 @@ def writeNetlist(netlist):
     ###########
     # Instances
     for instance in netlist.instances:
-        print(instance.cell.name)
+        # print(instance.cell.name)
         outStr += "{} {} ( {} );\n".format(instance.cell.name, instance.name, ", ".join(['.'+p+"()" for p in instance.cell.pins.keys()]))
 
     ############
@@ -216,6 +248,8 @@ if __name__ == "__main__":
         leffile = args["--lef"]
     if args["--name"]:
         topModuleName = args["--name"]
+    if args["--dist"]:
+        distfile = args["--dist"]
 
 
     # Create the directory for the output.
@@ -248,7 +282,9 @@ if __name__ == "__main__":
 
     stdCells = parseLEF(leffile)
 
-    netlist = generateNetlist(topModuleName, stdCells)
+    distribution = distributionFromFile(distfile)
+
+    netlist = generateNetlist(topModuleName, stdCells, distribution)
     writeNetlist(netlist)
 
 
