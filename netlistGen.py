@@ -47,8 +47,8 @@ class StdCell:
         self.pins = dict() # {name : Pin instance}
         self.width = 0
         self.height = 0
-        self.inputs = list() # list of input names
-        self.output = "" # output pin name
+        # self.inputs = list() # list of input names
+        # self.output = "" # output pin name
 
     def numberPins(self):
         return len(self.pins)
@@ -73,22 +73,14 @@ class Pin:
 
 class Instance:
     def __init__(self, name, cell=None):
-        self.name = name # [str] name of the instance
-        self.cell = cell # [StdCell]
+        self.name = name # str : name of the instance
+        self.cell = cell # StdCell
         self.inputs = dict() # {pin name : 0|net name}, 0 => pin is free
         self.outputs = dict() # {pin name : 0|net name}, 0 => pin is free
 
-    def setStdCell(self, cell):
-        """
-        Parameters:
-        -----------
-        cell : StdCell
-        """
-        self.cell = cell
-
 class Net:
-    def __init__(self):
-        self.name = ""
+    def __init__(self, name):
+        self.name = name
         self.dir = "" # input, output, wire
 
 class Netlist:
@@ -96,6 +88,7 @@ class Netlist:
         self.topmodule = topmodule # [str] name of the to module
         self.pins = list() # [Pin] list of input/output pins of the top module
         self.instances = list() # [Instance]
+        self.nets = list() # [Net]
 
         ##       ##     ###     ########   ##      ##          
         ###     ###    ## ##       ##      ###     ##          
@@ -228,18 +221,31 @@ def generateNetlist(name, stdCells, distribution):
         cell = stdCells[c]
         name = cell.name.lower() + "_" + str(i)
         instance = Instance(name, cell=cell)
+
+        #############################################################
+        # Extract and list all pins of the stdcell into the instance.
+        outputPinName = ""
         for pin in cell.pins.values():
             if pin.dir == "INPUT":
                 instance.inputs[pin.name] = 0
             elif pin.dir == "OUTPUT":
                 instance.outputs[pin.name] = 0
+                outputPinName = pin.name
             else:
                 logger.error("Unexpected pin dir: {} for pin {} in cell {}\n Aborting".format(pin.dir, pin.name, cell.name))
                 sys.exit()
         if len(instance.outputs) > 1:
-            logger.error("{}".format(cell.name))
+            logger.error("Too many outputs in cell {}".format(cell.name))
             sys.exit()
-            
+
+
+        #######################################
+        # Create a net for each instance output
+        net = Net(instance.name + "_net")
+        net.dir = "wire" # not connected to an I/O pin yet.
+        instance.outputs[outputPinName] = net
+        netlist.nets.append(net)
+
 
         netlist.instances.append(instance)
 
@@ -263,12 +269,23 @@ def writeNetlist(netlist):
 
     ################
     # Nets and wires
+    for net in netlist.nets:
+        outStr += "{} {};\n".format(net.dir, net.name)
 
     ###########
     # Instances
     for instance in netlist.instances:
         # print(instance.cell.name)
-        outStr += "{} {} ( {} );\n".format(instance.cell.name, instance.name, ", ".join(['.'+p+"()" for p in instance.cell.pins.keys()]))
+        outStr += "{} {} ( ".format(instance.cell.name, instance.name)
+        pinStrList = list()
+        for pin in instance.cell.pins.values():
+            pinStr = "." + pin.name + "("
+            if pin.dir == "OUTPUT":
+                pinStr += instance.outputs[pin.name].name
+            pinStr += ")"
+            pinStrList.append(pinStr)
+        outStr += ", ".join(pinStrList)
+        outStr += ");\n"
 
     ############
     # Write file
