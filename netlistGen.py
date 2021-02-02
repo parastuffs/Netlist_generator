@@ -36,6 +36,7 @@ except locale.Error:
     locale.setlocale(locale.LC_ALL, 'en_GB.UTF-8')
 
 RANDOM_SEED = 0 # Set to 0 if no seed is used, otherwise set to seed value.
+NO_POWER = True # Ignore POWER pins.
 
 logger = logging.getLogger('default')
 
@@ -46,6 +47,8 @@ class StdCell:
         self.pins = dict() # {name : Pin instance}
         self.width = 0
         self.height = 0
+        self.inputs = list() # list of input names
+        self.output = "" # output pin name
 
     def numberPins(self):
         return len(self.pins)
@@ -65,12 +68,15 @@ class StdCell:
 class Pin:
     def __init__(self,name):
         self.name = name
-        self.dir = "" # input, output, inout
+        self.dir = "" # INPUT, OUTPUT, INOUT
+        self.type = "" # SIGNAL, CLOCK, POWER
 
 class Instance:
     def __init__(self, name, cell=None):
         self.name = name # [str] name of the instance
         self.cell = cell # [StdCell]
+        self.inputs = dict() # {pin name : 0|net name}, 0 => pin is free
+        self.outputs = dict() # {pin name : 0|net name}, 0 => pin is free
 
     def setStdCell(self, cell):
         """
@@ -124,15 +130,41 @@ def parseLEF(leffile):
 
     with alive_bar(len(lines)) as bar:
         for line in lines:
+            bar()
             line = line.strip()
+
+            #######
+            # PIN #
+            #######
             if 'PIN' in line:
                 pinName = line.split()[1]
-                if "VCC" in pinName or "VSS" in pinName or "GND" in pinName or "VDD" in pinName:
-                    continue
                 pin = Pin(pinName) # Create a Pin object. The name of the pin is the second word in the line 'PIN ...'
-                stdCell.addPin(pin)
-                # print "Added the pin '"+str(pin.name)+"' to the macro '"+str(macro.name)+"'."
 
+            # Direction of the pin previously created.
+            if 'DIRECTION' in line:
+                direction = line.split()[1]
+                if direction not in ["INPUT", "OUTPUT", "INOUT"]:
+                    logger.error("Unknown pin direction: {}\n Aborting.".format(line))
+                    sys.exit()
+                pin.dir = direction
+
+            # Type of pin.
+            if 'USE ' in line:
+                use = line.split()[1]
+                if use not in ["POWER", "SIGNAL", "CLOCK", "GROUND"]:
+                    logger.error("Unknown pin use: {}\n Aborting.".format(line))
+                    sys.exit()
+                pin.type = use
+
+                if NO_POWER and use in ["POWER", "GROUND"]:
+                    continue
+                else:
+                    stdCell.addPin(pin)
+                    # logger.debug("Adding pin {}, dir {}, to cell {}".format(pin.name, pin.dir, stdCell.name))
+
+            #########
+            # MACRO #
+            #########
             if 'MACRO' in line:
                 stdCell = StdCell(line.split()[1]) # Create an StdCell object. The name of the StdCell is the second word in the line 'MACRO ...'
                 stdCells[stdCell.name] = stdCell
@@ -143,7 +175,6 @@ def parseLEF(leffile):
                 size = line.split()
                 stdCell.setWidth(float(size[1]))
                 stdCell.setHeight(float(size[3]))
-            bar()
     return stdCells
 
 def distributionFromFile(inFile):
@@ -197,6 +228,18 @@ def generateNetlist(name, stdCells, distribution):
         cell = stdCells[c]
         name = cell.name.lower() + "_" + str(i)
         instance = Instance(name, cell=cell)
+        for pin in cell.pins.values():
+            if pin.dir == "INPUT":
+                instance.inputs[pin.name] = 0
+            elif pin.dir == "OUTPUT":
+                instance.outputs[pin.name] = 0
+            else:
+                logger.error("Unexpected pin dir: {} for pin {} in cell {}\n Aborting".format(pin.dir, pin.name, cell.name))
+                sys.exit()
+        if len(instance.outputs) > 1:
+            logger.error("{}".format(cell.name))
+            sys.exit()
+            
 
         netlist.instances.append(instance)
 
