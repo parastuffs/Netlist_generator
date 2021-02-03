@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Usage:
-    netlistGen.py (--lef=<file>) [--gates=n] [--name=<name>] [--dist=<file>]
+    netlistGen.py (--lef=<file>) [--gates=n] [--name=<name>] [--dist=<file>] [--fanout=<int>] [--suppress-wires]
     netlistGen.py (--help|-h)
 
 Options:
@@ -9,6 +9,8 @@ Options:
     --gates=n               Amount of gate in the netlist
     --name=<name>           Top module name
     --dist=<file>           Std cell distribution file
+    --fanout=<int>          Average fanout, integer
+    --suppress-wires        Do not write 'wire's in netlist
     -h --help               Print this help
 
 Note: Power pins are ignored in standard cells.
@@ -75,8 +77,8 @@ class Instance:
     def __init__(self, name, cell=None):
         self.name = name # str : name of the instance
         self.cell = cell # StdCell
-        self.inputs = dict() # {pin name : 0|net name}, 0 => pin is free
-        self.outputs = dict() # {pin name : 0|net name}, 0 => pin is free
+        self.inputs = dict() # {pin name : 0|net}, 0 => pin is free
+        self.outputs = dict() # {pin name : 0|net}, 0 => pin is free
 
 class Net:
     def __init__(self, name):
@@ -126,34 +128,35 @@ def parseLEF(leffile):
             bar()
             line = line.strip()
 
-            #######
-            # PIN #
-            #######
-            if 'PIN' in line:
-                pinName = line.split()[1]
-                pin = Pin(pinName) # Create a Pin object. The name of the pin is the second word in the line 'PIN ...'
+            if macroBlock:
+                #######
+                # PIN #
+                #######
+                if 'PIN' in line:
+                    pinName = line.split()[1]
+                    pin = Pin(pinName) # Create a Pin object. The name of the pin is the second word in the line 'PIN ...'
 
-            # Direction of the pin previously created.
-            if 'DIRECTION' in line:
-                direction = line.split()[1]
-                if direction not in ["INPUT", "OUTPUT", "INOUT"]:
-                    logger.error("Unknown pin direction: {}\n Aborting.".format(line))
-                    sys.exit()
-                pin.dir = direction
+                # Direction of the pin previously created.
+                if 'DIRECTION' in line:
+                    direction = line.split()[1]
+                    if direction not in ["INPUT", "OUTPUT", "INOUT"]:
+                        logger.error("Unknown pin direction: {}\n Aborting.".format(line))
+                        sys.exit()
+                    pin.dir = direction
 
-            # Type of pin.
-            if 'USE ' in line:
-                use = line.split()[1]
-                if use not in ["POWER", "SIGNAL", "CLOCK", "GROUND"]:
-                    logger.error("Unknown pin use: {}\n Aborting.".format(line))
-                    sys.exit()
-                pin.type = use
+                # Type of pin.
+                if 'USE ' in line:
+                    use = line.split()[1]
+                    if use not in ["POWER", "SIGNAL", "CLOCK", "GROUND"]:
+                        logger.error("Unknown pin use: {}\n Aborting.".format(line))
+                        sys.exit()
+                    pin.type = use
 
-                if NO_POWER and use in ["POWER", "GROUND"]:
-                    continue
-                else:
-                    stdCell.addPin(pin)
-                    # logger.debug("Adding pin {}, dir {}, to cell {}".format(pin.name, pin.dir, stdCell.name))
+                    if NO_POWER and use in ["POWER", "GROUND"]:
+                        continue
+                    else:
+                        stdCell.addPin(pin)
+                        # logger.debug("Adding pin {}, dir {}, to cell {}".format(pin.name, pin.dir, stdCell.name))
 
             #########
             # MACRO #
@@ -161,6 +164,10 @@ def parseLEF(leffile):
             if 'MACRO' in line:
                 stdCell = StdCell(line.split()[1]) # Create an StdCell object. The name of the StdCell is the second word in the line 'MACRO ...'
                 stdCells[stdCell.name] = stdCell
+                macroBlock = True
+
+            if macroBlock and 'END {}'.format(stdCell.name) in line:
+                macroBlock = False
 
             if 'SIZE' in line:
                 # Sample line: SIZE 0.42 BY 0.24 ;
@@ -199,7 +206,7 @@ def distributionFromFile(inFile):
 
     return distribution
 
-def generateNetlist(name, stdCells, distribution):
+def generateNetlist(name, stdCells, distribution, fanout, ngates):
     """
 
     Parameters:
@@ -215,62 +222,117 @@ def generateNetlist(name, stdCells, distribution):
     """
     netlist = Netlist(name)
 
-    cells = random.choices(list(distribution.keys()), distribution.values(), k=10)
+    cells = random.choices(list(distribution.keys()), distribution.values(), k=ngates)
 
-    for i, c in enumerate(cells):
-        cell = stdCells[c]
-        name = cell.name.lower() + "_" + str(i)
-        instance = Instance(name, cell=cell)
+    instAvail = list() # List of instances with at least one input available
 
-        #############################################################
-        # Extract and list all pins of the stdcell into the instance.
-        outputPinName = ""
-        for pin in cell.pins.values():
-            if pin.dir == "INPUT":
-                instance.inputs[pin.name] = 0
-            elif pin.dir == "OUTPUT":
-                instance.outputs[pin.name] = 0
-                outputPinName = pin.name
-            else:
-                logger.error("Unexpected pin dir: {} for pin {} in cell {}\n Aborting".format(pin.dir, pin.name, cell.name))
+    with alive_bar(len(cells)) as bar:
+        for i, c in enumerate(cells):
+            bar()
+            cell = stdCells[c]
+            name = cell.name.lower() + "_" + str(i)
+            instance = Instance(name, cell=cell)
+
+            #############################################################
+            # Extract and list all pins of the stdcell into the instance.
+            outputPinName = ""
+            for pin in cell.pins.values():
+                if pin.dir == "INPUT":
+                    instance.inputs[pin.name] = 0
+                elif pin.dir == "OUTPUT":
+                    instance.outputs[pin.name] = 0
+                    outputPinName = pin.name
+                else:
+                    logger.error("Unexpected pin dir: {} for pin {} in cell {}\n Aborting".format(pin.dir, pin.name, cell.name))
+                    sys.exit()
+            if len(instance.outputs) > 1:
+                logger.error("Too many outputs in cell {}".format(cell.name))
                 sys.exit()
-        if len(instance.outputs) > 1:
-            logger.error("Too many outputs in cell {}".format(cell.name))
-            sys.exit()
 
 
-        #######################################
-        # Create a net for each instance output
-        net = Net(instance.name + "_net")
-        net.dir = "wire" # not connected to an I/O pin yet.
-        instance.outputs[outputPinName] = net
-        netlist.nets.append(net)
+            #######################################
+            # Create a net for each instance output
+            net = Net(instance.name + "_net")
+            net.dir = "wire" # not connected to an I/O pin yet.
+            instance.outputs[outputPinName] = net
+            netlist.nets.append(net)
 
+            # List of all instances having at least on available input:
+            instAvail.append(instance)
 
-        netlist.instances.append(instance)
+            netlist.instances.append(instance)
+
+    #####################
+    # Link nets to inputs
+    #
+    # For each gate, take the output net and assign it to n inputs.
+    # n is int(random.gauss(2,1)), where 2 is the average desired fanout and 1 the stdev.
+    with alive_bar(len(netlist.instances)) as bar:
+        for instance in netlist.instances:
+            bar()
+            randFanout = int(random.gauss(fanout, 1))
+            net = instance.outputs[list(instance.outputs.keys())[0]]
+
+            for i in range(randFanout):
+                found = False
+                while not found:
+                    if len(instAvail) == 0:
+                        break
+                    candidate = random.choice(instAvail)
+                    if 0 in candidate.inputs.values():
+                        for pin in candidate.inputs.keys():
+                            if candidate.inputs[pin] == 0:
+                                candidate.inputs[pin] = net
+                                break
+                        found = True
+                    else:
+                        instAvail.remove(candidate)
+
+    ######################################################
+    # Create input I/O for unassigned inputs in instances.
+    with alive_bar(len(instAvail)) as bar:
+        for instance in instAvail:
+            bar()
+            for pin in instance.inputs.keys():
+                if instance.inputs[pin] == 0:
+                    netName = instance.name + "_" + pin
+                    inIONet = Net(netName)
+                    inIONet.dir = "input"
+                    instance.inputs[pin] = inIONet
+                    netlist.nets.append(inIONet)
+
+                    inIOPin = Pin(netName)
+                    inIOPin.dir = "INPUT"
+                    inIOPin.type = "SIGNAL"
+                    netlist.pins.append(inIOPin)
 
     return netlist
 
 
 
-def writeNetlist(netlist):
+def writeNetlist(netlist, suppressWires):
     """
 
     Parameters:
     -----------
     netlist : Netlist
+
+    suppressWires : boolean
+        If True, do not write 'wire' statements
     """
 
     #############################
     # First: top module and pins.
     outStr = "module {} ( {} );\n".format(netlist.topmodule, ",".join([x.name for x in netlist.pins]))
     for pin in netlist.pins:
-        outStr += "{} {};\n".format(pin.dir, pin.name)
+        outStr += "{} {};\n".format(pin.dir.lower(), pin.name)
 
     ################
     # Nets and wires
-    for net in netlist.nets:
-        outStr += "{} {};\n".format(net.dir, net.name)
+    if not suppressWires:
+        for net in netlist.nets:
+            if net.dir == "wire":
+                outStr += "{} {};\n".format(net.dir, net.name)
 
     ###########
     # Instances
@@ -282,10 +344,18 @@ def writeNetlist(netlist):
             pinStr = "." + pin.name + "("
             if pin.dir == "OUTPUT":
                 pinStr += instance.outputs[pin.name].name
+            elif pin.dir == "INPUT":
+                if instance.inputs[pin.name] == 0:
+                    pinStr += "UNASSIGNED"
+                    logger.warning("UNASSIGNED pin '{}' in '{}'".format(pin.name, instance.name))
+                else:
+                    pinStr += instance.inputs[pin.name].name
             pinStr += ")"
             pinStrList.append(pinStr)
         outStr += ", ".join(pinStrList)
         outStr += ");\n"
+
+    outStr += "\n endmodule"
 
     ############
     # Write file
@@ -303,6 +373,9 @@ if __name__ == "__main__":
     args = docopt(__doc__)
 
     topModuleName = "customDesign"
+    fanout = 3
+    ngates = 10
+    suppressWires = False
 
     if args["--lef"]:
         leffile = args["--lef"]
@@ -310,6 +383,12 @@ if __name__ == "__main__":
         topModuleName = args["--name"]
     if args["--dist"]:
         distfile = args["--dist"]
+    if args["--fanout"]:
+        fanout = args["--fanout"]
+    if args["--gates"]:
+        ngates = int(args["--gates"])
+    if args["--suppress-wires"]:
+        suppressWires = True
 
 
     # Create the directory for the output.
@@ -344,8 +423,8 @@ if __name__ == "__main__":
 
     distribution = distributionFromFile(distfile)
 
-    netlist = generateNetlist(topModuleName, stdCells, distribution)
-    writeNetlist(netlist)
+    netlist = generateNetlist(topModuleName, stdCells, distribution, fanout, ngates)
+    writeNetlist(netlist, suppressWires)
 
 
     logger.info("End of all.")
