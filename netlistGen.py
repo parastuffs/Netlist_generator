@@ -265,6 +265,23 @@ def generateNetlist(name, stdCells, distribution, fanout, ngates):
 
             netlist.instances.append(instance)
 
+    ###############################
+    # Generate clock for Flip-Flops
+    clock = Net("clock")
+    clock.dir = "input"
+    netlist.nets.append(clock)
+
+    clockPin = Pin("clock")
+    clockPin.dir = "INPUT"
+    clockPin.type = "CLOCK"
+    netlist.pins.append(clock)
+
+    for instance in netlist.instances:
+        for pinName in instance.inputs.keys():
+            pinType = stdCells[instance.cell.name].pins[pinName].type
+            if pinType == "CLOCK":
+                instance.inputs[pinName] = clock
+
     #####################
     # Link nets to inputs
     #
@@ -396,7 +413,7 @@ if __name__ == "__main__":
 
     # Create the directory for the output.
     rootDir = os.getcwd()
-    output_dir = rootDir + "/" + datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S") + "_" + topModuleName + "_" + leffile.split(os.sep)[-1]
+    output_dir = rootDir + "/" + datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S") + "_" + topModuleName + "_" + "ngates-" + str(ngates) + "_" + "fanout-" + str(fanout) + "_" + leffile.split(os.sep)[-1]
 
     try:
         os.makedirs(output_dir)
