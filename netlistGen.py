@@ -16,12 +16,9 @@ Options:
 Note: Power pins are ignored in standard cells.
 """
 
-from PIL import Image
 import math
-import copy
 import locale
 import os
-import shutil
 import datetime
 import errno
 import random
@@ -29,7 +26,6 @@ from docopt import docopt
 import logging, logging.config
 import numpy as np
 import sys
-import matplotlib.pyplot as plt
 import statistics
 from alive_progress import alive_bar
 try:
@@ -49,8 +45,6 @@ class StdCell:
         self.pins = dict() # {name : Pin instance}
         self.width = 0
         self.height = 0
-        # self.inputs = list() # list of input names
-        # self.output = "" # output pin name
 
     def numberPins(self):
         return len(self.pins)
@@ -156,7 +150,6 @@ def parseLEF(leffile):
                         continue
                     else:
                         stdCell.addPin(pin)
-                        # logger.debug("Adding pin {}, dir {}, to cell {}".format(pin.name, pin.dir, stdCell.name))
 
             #########
             # MACRO #
@@ -208,6 +201,12 @@ def distributionFromFile(inFile):
 
 def generateNetlist(name, stdCells, distribution, fanout, ngates):
     """
+    1. Create *ngates* based on *distribution*.
+    2. For each gate, create a net at the output pin.
+    3. Once it's done, connect each net to x inputs of other gates.
+        x is picked on a gaussian centered around *fanout*.
+    4. For each input that has not been connected yet,
+        create a top module IO input connecting it.
 
     Parameters:
     -----------
@@ -217,6 +216,10 @@ def generateNetlist(name, stdCells, distribution, fanout, ngates):
         {cell name : StdCell}
     distribution : dict
         {cell name : weight}
+    fanout : int
+        Average fanout of a net
+    ngates : int
+        Amount of gates to generate
 
     return Netlist instance
     """
@@ -401,6 +404,9 @@ if __name__ == "__main__":
         if e.errno != errno.EEXIST:
             raise
 
+    ###########
+    # Logging #
+    ###########
     # Load base config from conf file.
     logging.config.fileConfig('log.conf')
     # Load logger from config
@@ -411,12 +417,14 @@ if __name__ == "__main__":
     fh.setFormatter(logging.Formatter('%(asctime)s: %(message)s'))
     # Add the handler to the logger
     logger.addHandler(fh)
-
     logger.debug(args)
 
     # Change the working directory to the one created above.
     os.chdir(output_dir)
 
+    ########
+    # Algo #
+    ########
     stdCells = dict() # {name : StdCell instance}
 
     stdCells = parseLEF(leffile)
@@ -424,8 +432,8 @@ if __name__ == "__main__":
     distribution = distributionFromFile(distfile)
 
     netlist = generateNetlist(topModuleName, stdCells, distribution, fanout, ngates)
+    
     writeNetlist(netlist, suppressWires)
-
 
     logger.info("End of all.")
 
