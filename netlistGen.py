@@ -227,6 +227,21 @@ def generateNetlist(name, stdCells, distribution, fanout, ngates):
 
     cells = random.choices(list(distribution.keys()), distribution.values(), k=ngates)
 
+    #######################
+    # Stats on logic and FF
+    logic = 0
+    ff = 0
+    for c in cells:
+        cell = stdCells[c]
+        logic += 1
+        for pin in cell.pins.values():
+            if pin.type == "CLOCK":
+                ff += 1
+                logic -= 1
+                break
+    logger.info("Logic: {} ({}%), FF: {} ({}%)".format(logic, 100*logic/(logic+ff), ff, 100*ff/(ff+logic)))
+
+
     instAvail = list() # List of instances with at least one input available
 
     with alive_bar(len(cells)) as bar:
