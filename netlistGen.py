@@ -223,23 +223,40 @@ def generateNetlist(name, stdCells, distribution, fanout, ngates):
 
     return Netlist instance
     """
+    ######################
+    # Some more parameters
+    CPDensity = 30 # Critical Path (CP) Density: Maximum amount of logic gates between two flip-flops (FFs).
+    ######################
+
+    # Updated idea: create 'clusters' of logic up to `CPDensity`.
+    # Interconnect them using a FF.
+    # All other FFs will become registers (shift, ...) by being interconnected toghether.
+    # Where should they be connected ?
+    # All clusters should not necessarily be daisy-chained. It could be a parameter changing the level of full interconnection.
+
     netlist = Netlist(name)
 
     cells = random.choices(list(distribution.keys()), distribution.values(), k=ngates)
 
+    logic = set()
+    ff = set()
+
     #######################
     # Stats on logic and FF
-    logic = 0
-    ff = 0
+    logicCnt = 0
+    ffCnt = 0
     for c in cells:
         cell = stdCells[c]
-        logic += 1
+        logicCnt += 1
+        logic.add(c)
         for pin in cell.pins.values():
             if pin.type == "CLOCK":
-                ff += 1
-                logic -= 1
+                ffCnt += 1
+                ff.add(c)
+                logicCnt -= 1
+                logic.remove(c)
                 break
-    logger.info("Logic: {} ({}%), FF: {} ({}%)".format(logic, 100*logic/(logic+ff), ff, 100*ff/(ff+logic)))
+    logger.info("Logic: {} ({}%), FF: {} ({}%)".format(logicCnt, 100*logicCnt/(logicCnt+ffCnt), ffCnt, 100*ffCnt/(ffCnt+logicCnt)))
 
 
     instAvail = list() # List of instances with at least one input available
