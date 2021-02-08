@@ -71,8 +71,8 @@ class Instance:
     def __init__(self, name, cell=None):
         self.name = name # str : name of the instance
         self.cell = cell # StdCell
-        self.inputs = dict() # {pin name : 0|net}, 0 => pin is free
-        self.outputs = dict() # {pin name : 0|net}, 0 => pin is free
+        self.inputs = dict() # {pin name : 0|Net}, 0 => pin is free
+        self.outputs = dict() # {pin name : 0|Net}, 0 => pin is free
 
 class Net:
     def __init__(self, name):
@@ -85,14 +85,6 @@ class Netlist:
         self.pins = list() # [Pin] list of input/output pins of the top module
         self.instances = list() # [Instance]
         self.nets = list() # [Net]
-
-        ##       ##     ###     ########   ##      ##          
-        ###     ###    ## ##       ##      ###     ##          
-        ## ## ## ##   ##   ##      ##      ## ##   ##          
-        ##  ###  ##  ##     ##     ##      ##  ##  ##          
-        ##       ##  #########     ##      ##   ## ##          
-        ##       ##  ##     ##     ##      ##     ###          
-####### ##       ##  ##     ##  ########   ##      ##  ####### 
 
 
 
@@ -226,6 +218,7 @@ def generateNetlist(name, stdCells, distribution, fanout, ngates):
     ######################
     # Some more parameters
     CPDensity = 30 # Critical Path (CP) Density: Maximum amount of logic gates between two flip-flops (FFs).
+
     ######################
 
     # Updated idea: create 'clusters' of logic up to `CPDensity`.
@@ -260,6 +253,8 @@ def generateNetlist(name, stdCells, distribution, fanout, ngates):
 
 
     instAvail = list() # List of instances with at least one input available
+    logicGates = list()
+    ffGates = list()
 
     with alive_bar(len(cells)) as bar:
         for i, c in enumerate(cells):
@@ -281,7 +276,7 @@ def generateNetlist(name, stdCells, distribution, fanout, ngates):
                     logger.error("Unexpected pin dir: {} for pin {} in cell {}\n Aborting".format(pin.dir, pin.name, cell.name))
                     sys.exit()
             if len(instance.outputs) > 1:
-                logger.error("Too many outputs in cell {}".format(cell.name))
+                logger.error("Too many outputs in cell {}\n Aborting".format(cell.name))
                 sys.exit()
 
 
@@ -295,7 +290,17 @@ def generateNetlist(name, stdCells, distribution, fanout, ngates):
             # List of all instances having at least on available input:
             instAvail.append(instance)
 
+            # Classify type of gate
+            if instance.cell.name in logic:
+                logicGates.append(instance)
+            elif instance.cell.name in ff:
+                ffGates.append(instance)
+            else:
+                logger.error("Instance is neither a logic gate nor an FF.\n Aborting")
+                sys.exit()
+
             netlist.instances.append(instance)
+    freeFF = ffGates[:]
 
     ###############################
     # Generate clock for Flip-Flops
@@ -314,23 +319,50 @@ def generateNetlist(name, stdCells, distribution, fanout, ngates):
             if pinType == "CLOCK":
                 instance.inputs[pinName] = clock
 
-    #####################
-    # Link nets to inputs
-    #
-    # For each gate, take the output net and assign it to n inputs.
-    # n is int(random.gauss(2,1)), where 2 is the average desired fanout and 1 the stdev.
-    with alive_bar(len(netlist.instances)) as bar:
-        for instance in netlist.instances:
-            bar()
-            randFanout = int(random.gauss(fanout, 1))
-            net = instance.outputs[list(instance.outputs.keys())[0]]
 
+    ###############################
+    # Group logic gates in clusters
+    #
+    logger.info("Creating clusters of logic")
+    with alive_bar() as bar:
+        while len(logicGates) > 0:
+            if len(logicGates) > CPDensity:
+                clusterSize = max([2,int(CPDensity - abs(random.gauss(0,CPDensity/2)))])
+                cluster = random.sample(logicGates, k=clusterSize)
+            else:
+                cluster = logicGates[:]
+            # logger.debug("New run: cluster = {}".format(clusterSize))
+            bar()
+
+            # Remove used gates from further consideration
+            for gate in cluster:
+                logicGates.remove(gate)
+
+            # First, daisy chain all the gates to build the CP.
+            i = 0
+            while i < len(cluster)-1:
+                gate = cluster[i]
+                net = gate.outputs[list(gate.outputs.keys())[0]]
+                cluster[i+1].inputs[list(cluster[i+1].inputs.keys())[0]] = net
+                i += 1
+
+            # Connect an input of the first gate to a FF.
+            randFF = random.choice(ffGates)
+            # print(randFF)
+            # logger.debug("cluster size: {}".format(len(cluster)))
+            # logger.debug("Cluster[0].name: {}, randFF.name: {}\n logic inputs:{}, ff outputs:{}".format(cluster[0].name, randFF.name, cluster[0].inputs, randFF.outputs))
+            cluster[0].inputs[list(cluster[0].inputs.keys())[0]] = randFF.outputs[list(randFF.outputs.keys())[0]]
+
+            # Connect the output of the last gate in the cluster to `randFanout` FFs.
+            randFanout = int(random.gauss(fanout, 1))
+            net = cluster[-1].outputs[list(cluster[-1].outputs.keys())[0]]
             for i in range(randFanout):
                 found = False
                 while not found:
-                    if len(instAvail) == 0:
+                    if len(freeFF) == 0:
+                        logger.warning("No more available inputs on FFs to connect the logic.")
                         break
-                    candidate = random.choice(instAvail)
+                    candidate = random.choice(freeFF)
                     if 0 in candidate.inputs.values():
                         for pin in candidate.inputs.keys():
                             if candidate.inputs[pin] == 0:
@@ -338,25 +370,171 @@ def generateNetlist(name, stdCells, distribution, fanout, ngates):
                                 break
                         found = True
                     else:
-                        instAvail.remove(candidate)
+                        # logger.debug("Removing {} in FF connected to output of cluster".format(candidate.name))
+                        freeFF.remove(candidate)
+
+
+
+
+            ###################################
+            # Interconnect logic inside cluster
+            # Once a gate has its inputs fully connected, remove it from the cluster.
+            i = 0
+            while i < len(cluster):
+                gate = cluster[i]
+                randFanout = int(random.gauss(fanout, 1)) - 1 # '-1' as they are already daisy chained.
+                # Get the net connected to the output of the gate
+                net = gate.outputs[list(gate.outputs.keys())[0]]
+                for j in range(randFanout):
+                    found = False
+                    while not found:
+                        if len(cluster) == 0:
+                            break
+                        candidate = random.choice(cluster)
+                        if 0 in candidate.inputs.values():
+                            for pin in candidate.inputs.keys():
+                                if candidate.inputs[pin] == 0:
+                                    candidate.inputs[pin] = net
+                                    break
+                            found = True
+                        else:
+                            # Decrement counter as we remove an element *before* the current index.
+                            if cluster.index(candidate) <= i:
+                                i -= 1
+                            cluster.remove(candidate)
+                i += 1
+            # If the cluster is not empty, need to connect the orphan inputs.
+            while len(cluster) > 0:
+                gateDonnor = random.choice(cluster) # Output net donnor
+                net = gateDonnor.outputs[list(gateDonnor.outputs.keys())[0]]
+                found = False
+                while not found:
+                    if len(cluster) == 0:
+                        break
+                    receiverGate = random.choice(cluster) # FF receiving said output to one of its free inputs
+                    if 0 in receiverGate.inputs.values():
+                        for pin in receiverGate.inputs.keys():
+                            if receiverGate.inputs[pin] == 0:
+                                receiverGate.inputs[pin] = net
+                                break
+                        found = True
+                    else:
+                        cluster.remove(receiverGate)
+
+
+    # #####################
+    # # Link nets to inputs
+    # #
+    # # For each gate, take the output net and assign it to n inputs.
+    # # n is int(random.gauss(2,1)), where 2 is the average desired fanout and 1 the stdev.
+    # with alive_bar(len(netlist.instances)) as bar:
+    #     for instance in netlist.instances:
+    #         bar()
+    #         randFanout = int(random.gauss(fanout, 1))
+    #         net = instance.outputs[list(instance.outputs.keys())[0]]
+
+    #         for i in range(randFanout):
+    #             found = False
+    #             while not found:
+    #                 if len(instAvail) == 0:
+    #                     break
+    #                 candidate = random.choice(instAvail)
+    #                 if 0 in candidate.inputs.values():
+    #                     for pin in candidate.inputs.keys():
+    #                         if candidate.inputs[pin] == 0:
+    #                             candidate.inputs[pin] = net
+    #                             break
+    #                     found = True
+    #                 else:
+    #                     instAvail.remove(candidate)
+
+    logger.debug("Free FFs after logic clustering: {}/{}".format(len(freeFF), len(ffGates)))
 
     ######################################################
     # Create input I/O for unassigned inputs in instances.
-    with alive_bar(len(instAvail)) as bar:
-        for instance in instAvail:
-            bar()
-            for pin in instance.inputs.keys():
-                if instance.inputs[pin] == 0:
-                    netName = instance.name + "_" + pin
-                    inIONet = Net(netName)
-                    inIONet.dir = "input"
-                    instance.inputs[pin] = inIONet
-                    netlist.nets.append(inIONet)
 
-                    inIOPin = Pin(netName)
-                    inIOPin.dir = "INPUT"
-                    inIOPin.type = "SIGNAL"
-                    netlist.pins.append(inIOPin)
+    # T = Number of I/O
+    # rent = Rent's t parameter, i.e. the average number of terminals per gate.
+    # p = Rent's exponent.
+    p = 0.5
+    rent = 3
+    T = rent * (ngates ** p)
+    logger.info("IO Terminals (Rent): {}".format(T))
+    for i in range(int(T)):
+        netName = "io_"+str(i)
+        # inIONet = Net(netName)
+        # inIONet.dir = "input"
+        # instance.inputs[pin] = inIONet
+        # netlist.nets.append(inIONet)
+
+        inIOPin = Pin(netName)
+        inIOPin.dir = "INPUT"
+        inIOPin.type = "SIGNAL"
+        netlist.pins.append(inIOPin)
+
+    # Connect the IO pins to free FFs.
+    for pin in netlist.pins:
+        net = Net(pin.name)
+        net.dir = "input"
+        found = False
+        while not found:
+            if len(freeFF) == 0:
+                logger.warning("No more available inputs on FFs to connect I/O.")
+                break
+            candidate = random.choice(freeFF)
+            if 0 in candidate.inputs.values():
+                for pin in candidate.inputs.keys():
+                    if candidate.inputs[pin] == 0:
+                        candidate.inputs[pin] = net
+                        break
+                found = True
+            else:
+                # logger.debug("Removing {} in FF I/Os".format(candidate.name))
+                freeFF.remove(candidate)
+
+    # Interconnect the remaining FFs into shift registers and the like.
+    logger.debug("Remaining FFs: {}".format(len(freeFF)))
+    while len(freeFF) > 0:
+        donnorFF = random.choice(freeFF) # FF giving an output
+        net = donnorFF.outputs[list(donnorFF.outputs.keys())[0]]
+        found = False
+        while not found:
+            if len(freeFF) == 0:
+                logger.warning("No more available inputs on FFs to connect other FFs.")
+                break
+            receiverFF = random.choice(freeFF) # FF receiving said output to one of its free inputs
+            if 0 in receiverFF.inputs.values():
+                for pin in receiverFF.inputs.keys():
+                    if receiverFF.inputs[pin] == 0:
+                        receiverFF.inputs[pin] = net
+                        break
+                found = True
+            else:
+                # logger.debug("Removing {} in FF registers".format(receiverFF.name))
+                freeFF.remove(receiverFF)
+
+
+
+
+
+
+
+
+    # with alive_bar(len(instAvail)) as bar:
+    #     for instance in instAvail:
+    #         bar()
+    #         for pin in instance.inputs.keys():
+    #             if instance.inputs[pin] == 0:
+    #                 netName = instance.name + "_" + pin
+    #                 inIONet = Net(netName)
+    #                 inIONet.dir = "input"
+    #                 instance.inputs[pin] = inIONet
+    #                 netlist.nets.append(inIONet)
+
+    #                 inIOPin = Pin(netName)
+    #                 inIOPin.dir = "INPUT"
+    #                 inIOPin.type = "SIGNAL"
+    #                 netlist.pins.append(inIOPin)
 
     return netlist
 
@@ -388,6 +566,7 @@ def writeNetlist(netlist, suppressWires):
 
     ###########
     # Instances
+    unassigned = False
     for instance in netlist.instances:
         # print(instance.cell.name)
         outStr += "{} {} ( ".format(instance.cell.name, instance.name)
@@ -399,6 +578,7 @@ def writeNetlist(netlist, suppressWires):
             elif pin.dir == "INPUT":
                 if instance.inputs[pin.name] == 0:
                     pinStr += "UNASSIGNED"
+                    unassigned = True
                     logger.warning("UNASSIGNED pin '{}' in '{}'".format(pin.name, instance.name))
                 else:
                     pinStr += instance.inputs[pin.name].name
@@ -408,6 +588,9 @@ def writeNetlist(netlist, suppressWires):
         outStr += ");\n"
 
     outStr += "\n endmodule"
+
+    if unassigned:
+        logger.warning("There were some UNASSIGNED pins in the netlist")
 
     ############
     # Write file
