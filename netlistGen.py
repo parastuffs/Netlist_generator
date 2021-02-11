@@ -252,7 +252,6 @@ def generateNetlist(name, stdCells, distribution, fanout, ngates):
     logger.info("Logic: {} ({}%), FF: {} ({}%)".format(logicCnt, 100*logicCnt/(logicCnt+ffCnt), ffCnt, 100*ffCnt/(ffCnt+logicCnt)))
 
 
-    instAvail = list() # List of instances with at least one input available
     logicGates = list()
     ffGates = list()
 
@@ -422,32 +421,6 @@ def generateNetlist(name, stdCells, distribution, fanout, ngates):
                         cluster.remove(receiverGate)
 
 
-    # #####################
-    # # Link nets to inputs
-    # #
-    # # For each gate, take the output net and assign it to n inputs.
-    # # n is int(random.gauss(2,1)), where 2 is the average desired fanout and 1 the stdev.
-    # with alive_bar(len(netlist.instances)) as bar:
-    #     for instance in netlist.instances:
-    #         bar()
-    #         randFanout = int(random.gauss(fanout, 1))
-    #         net = instance.outputs[list(instance.outputs.keys())[0]]
-
-    #         for i in range(randFanout):
-    #             found = False
-    #             while not found:
-    #                 if len(instAvail) == 0:
-    #                     break
-    #                 candidate = random.choice(instAvail)
-    #                 if 0 in candidate.inputs.values():
-    #                     for pin in candidate.inputs.keys():
-    #                         if candidate.inputs[pin] == 0:
-    #                             candidate.inputs[pin] = net
-    #                             break
-    #                     found = True
-    #                 else:
-    #                     instAvail.remove(candidate)
-
     logger.debug("Free FFs after logic clustering: {}/{}".format(len(freeFF), len(ffGates)))
 
     ######################################################
@@ -513,28 +486,6 @@ def generateNetlist(name, stdCells, distribution, fanout, ngates):
                 # logger.debug("Removing {} in FF registers".format(receiverFF.name))
                 freeFF.remove(receiverFF)
 
-
-
-
-
-
-
-
-    # with alive_bar(len(instAvail)) as bar:
-    #     for instance in instAvail:
-    #         bar()
-    #         for pin in instance.inputs.keys():
-    #             if instance.inputs[pin] == 0:
-    #                 netName = instance.name + "_" + pin
-    #                 inIONet = Net(netName)
-    #                 inIONet.dir = "input"
-    #                 instance.inputs[pin] = inIONet
-    #                 netlist.nets.append(inIONet)
-
-    #                 inIOPin = Pin(netName)
-    #                 inIOPin.dir = "INPUT"
-    #                 inIOPin.type = "SIGNAL"
-    #                 netlist.pins.append(inIOPin)
 
     return netlist
 
