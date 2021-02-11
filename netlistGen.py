@@ -72,7 +72,7 @@ class Instance:
         self.name = name # str : name of the instance
         self.cell = cell # StdCell
         self.inputs = dict() # {pin name : 0|Net}, 0 => pin is free
-        self.outputs = dict() # {pin name : 0|Net}, 0 => pin is free
+        self.output = [None, 0] # [pin name, 0|Net], 0 => pin is free
 
 class Net:
     def __init__(self, name):
@@ -255,6 +255,10 @@ def generateNetlist(name, stdCells, distribution, fanout, ngates):
     logicGates = list()
     ffGates = list()
 
+
+    ###################
+    # Prepare instances
+    # Assign them there stand cell and create a net at the output.
     with alive_bar(len(cells)) as bar:
         for i, c in enumerate(cells):
             bar()
@@ -269,25 +273,22 @@ def generateNetlist(name, stdCells, distribution, fanout, ngates):
                 if pin.dir == "INPUT":
                     instance.inputs[pin.name] = 0
                 elif pin.dir == "OUTPUT":
-                    instance.outputs[pin.name] = 0
+                    if instance.output[0] != None:
+                        logger.error("Too many outputs in cell {}\n Aborting".format(cell.name))
+                        sys.exit()
+                    instance.output[0] = pin.name
                     outputPinName = pin.name
                 else:
                     logger.error("Unexpected pin dir: {} for pin {} in cell {}\n Aborting".format(pin.dir, pin.name, cell.name))
                     sys.exit()
-            if len(instance.outputs) > 1:
-                logger.error("Too many outputs in cell {}\n Aborting".format(cell.name))
-                sys.exit()
 
 
             #######################################
             # Create a net for each instance output
             net = Net(instance.name + "_net")
             net.dir = "wire" # not connected to an I/O pin yet.
-            instance.outputs[outputPinName] = net
+            instance.output[1] = net
             netlist.nets.append(net)
-
-            # List of all instances having at least on available input:
-            instAvail.append(instance)
 
             # Classify type of gate
             if instance.cell.name in logic:
@@ -341,7 +342,7 @@ def generateNetlist(name, stdCells, distribution, fanout, ngates):
             i = 0
             while i < len(cluster)-1:
                 gate = cluster[i]
-                net = gate.outputs[list(gate.outputs.keys())[0]]
+                net = gate.output[1]
                 cluster[i+1].inputs[list(cluster[i+1].inputs.keys())[0]] = net
                 i += 1
 
@@ -350,11 +351,11 @@ def generateNetlist(name, stdCells, distribution, fanout, ngates):
             # print(randFF)
             # logger.debug("cluster size: {}".format(len(cluster)))
             # logger.debug("Cluster[0].name: {}, randFF.name: {}\n logic inputs:{}, ff outputs:{}".format(cluster[0].name, randFF.name, cluster[0].inputs, randFF.outputs))
-            cluster[0].inputs[list(cluster[0].inputs.keys())[0]] = randFF.outputs[list(randFF.outputs.keys())[0]]
+            cluster[0].inputs[list(cluster[0].inputs.keys())[0]] = randFF.output[1]
 
             # Connect the output of the last gate in the cluster to `randFanout` FFs.
             randFanout = int(random.gauss(fanout, 1))
-            net = cluster[-1].outputs[list(cluster[-1].outputs.keys())[0]]
+            net = cluster[-1].output[1]
             for i in range(randFanout):
                 found = False
                 while not found:
@@ -383,7 +384,7 @@ def generateNetlist(name, stdCells, distribution, fanout, ngates):
                 gate = cluster[i]
                 randFanout = int(random.gauss(fanout, 1)) - 1 # '-1' as they are already daisy chained.
                 # Get the net connected to the output of the gate
-                net = gate.outputs[list(gate.outputs.keys())[0]]
+                net = gate.output[1]
                 for j in range(randFanout):
                     found = False
                     while not found:
@@ -405,7 +406,7 @@ def generateNetlist(name, stdCells, distribution, fanout, ngates):
             # If the cluster is not empty, need to connect the orphan inputs.
             while len(cluster) > 0:
                 gateDonnor = random.choice(cluster) # Output net donnor
-                net = gateDonnor.outputs[list(gateDonnor.outputs.keys())[0]]
+                net = gateDonnor.output[1]
                 found = False
                 while not found:
                     if len(cluster) == 0:
@@ -469,7 +470,7 @@ def generateNetlist(name, stdCells, distribution, fanout, ngates):
     logger.debug("Remaining FFs: {}".format(len(freeFF)))
     while len(freeFF) > 0:
         donnorFF = random.choice(freeFF) # FF giving an output
-        net = donnorFF.outputs[list(donnorFF.outputs.keys())[0]]
+        net = donnorFF.output[1]
         found = False
         while not found:
             if len(freeFF) == 0:
@@ -525,7 +526,7 @@ def writeNetlist(netlist, suppressWires):
         for pin in instance.cell.pins.values():
             pinStr = "." + pin.name + "("
             if pin.dir == "OUTPUT":
-                pinStr += instance.outputs[pin.name].name
+                pinStr += instance.output[1].name
             elif pin.dir == "INPUT":
                 if instance.inputs[pin.name] == 0:
                     pinStr += "UNASSIGNED"
