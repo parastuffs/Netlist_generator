@@ -562,7 +562,7 @@ def generateNetlist(name, stdCells, distribution, fanout, ngates):
     # T = Number of I/O
     # rent = Rent's t parameter, i.e. the average number of terminals per gate.
     # p = Rent's exponent.
-    p = 0.5
+    p = 0.4
     rent = 3
     T = rent * (ngates ** p)
     logger.info("IO Terminals (Rent): {}".format(T))
