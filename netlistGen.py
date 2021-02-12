@@ -191,6 +191,64 @@ def distributionFromFile(inFile):
 
     return distribution
 
+def regenFF(distribution, stdCells, ID):
+    """
+    Regenerate a new FF based on the given distribution.
+
+    Append the new FF to ffGates.
+
+    Parameters:
+    -----------
+    distribution : dict
+        {cell name : weight}
+    stdCells : dict
+        {cell name : StdCell}
+    ID : int
+        ID of the instance, appended to its name.
+
+    Return:
+    -------
+    ff : Instance
+    """
+    found = False
+    cellName = None
+    while not found:
+        cellName = random.choices(list(distribution.keys()), distribution.values(), k=1)[0]
+        cell = stdCells[cellName]
+        for pin in cell.pins.values():
+            if pin.type == "CLOCK":
+                found = True
+    name = cell.name.lower() + "_" + str(ID)
+    instance = Instance(name, cell=cell)
+    #############################################################
+    # Extract and list all pins of the stdcell into the instance.
+    outputPinName = ""
+    for pin in cell.pins.values():
+        if pin.dir == "INPUT":
+            instance.inputs[pin.name] = 0
+        elif pin.dir == "OUTPUT":
+            if instance.output[0] != None:
+                logger.error("Too many outputs in cell {}\n Aborting".format(cell.name))
+                sys.exit()
+            instance.output[0] = pin.name
+            outputPinName = pin.name
+        else:
+            logger.error("Unexpected pin dir: {} for pin {} in cell {}\n Aborting".format(pin.dir, pin.name, cell.name))
+            sys.exit()
+
+    return instance
+
+
+
+
+    #######################################
+    # Create a net for each instance output
+    net = Net(instance.name + "_net")
+    net.dir = "wire" # not connected to an I/O pin yet.
+    instance.output[1] = net
+    netlist.nets.append(net)
+
+
 def generateNetlist(name, stdCells, distribution, fanout, ngates):
     """
     1. Create *ngates* based on *distribution*.
@@ -320,106 +378,180 @@ def generateNetlist(name, stdCells, distribution, fanout, ngates):
                 instance.inputs[pinName] = clock
 
 
-    ###############################
-    # Group logic gates in clusters
-    #
-    logger.info("Creating clusters of logic")
-    with alive_bar() as bar:
-        while len(logicGates) > 0:
-            if len(logicGates) > CPDensity:
-                clusterSize = max([2,int(CPDensity - abs(random.gauss(0,CPDensity/2)))])
-                cluster = random.sample(logicGates, k=clusterSize)
-            else:
-                cluster = logicGates[:]
-            # logger.debug("New run: cluster = {}".format(clusterSize))
-            bar()
 
-            # Remove used gates from further consideration
-            for gate in cluster:
-                logicGates.remove(gate)
+    ################################
+    # Alternative logic clouds
+    logger.info("Creating clouds of logic.")
+    while len(logicGates) > 0:
+        # Get a sample of logic gates
+        # cloudSize = random function of the total gates in the design
+        ioCount = [0,0] # number of inputs, outputs of the cloud
+        cloudSize = random.randint(10,100)
+        logger.info("Cloud size: {}".format(cloudSize))
+        if cloudSize < len(logicGates):
+            cloud = random.sample(logicGates, k=cloudSize)
+        else:
+            cloud = logicGates[:]
+        for gate in cloud:
+            logicGates.remove(gate)
+        levels = list()
+        # Slice the could into levels
+        while len(cloud) > 0:
+            levelSize = min([random.randint(1, 10), len(cloud)])
+            level = random.sample(cloud, k=levelSize)
+            for gate in level:
+                cloud.remove(gate)
+            levels.append(level)
+        logger.info("Number of levels: {}".format(len(levels)))
+        # For each level, connect all the input to the outputs of the previous level.
+        # If any previous level output is not connected, forward if to a FF.
+        for i in range(len(levels)-1):
+            level = levels[i+1]
+            prevLevel = levels[i]
+            outputNets = set([x.output[1] for x in prevLevel])
+            outputNetsAssigned = set()
+            for instance in level:
+                for inputPin in instance.inputs.keys():
+                    outputNet = random.choice(list(outputNets))
+                    outputNetsAssigned.add(outputNet)
+                    instance.inputs[inputPin] = outputNet
+            outputNetsUnassigned = outputNets - outputNetsAssigned
+            # For each gate wich output has not been assigned to an input of level i, connect a FF.
+            for net in outputNetsUnassigned:
+                if len(freeFF) > 0:
+                    flipflop = random.choice(freeFF)
+                else:
+                    flipflop = regenFF(distribution, stdCells, ID=len(ffGates))
+                    netlist.instances.append(flipflop)
+                    # Create a net for the output
+                    net = Net(flipflop.name + "_net")
+                    net.dir = "wire" # not connected to an I/O pin yet.
+                    flipflop.output[1] = net
+                    netlist.nets.append(net)
+                    
+                    ffGates.append(flipflop)
+                    netlist.instances.append(flipflop)
+                    freeFF.append(flipflop)
 
-            # First, daisy chain all the gates to build the CP.
-            i = 0
-            while i < len(cluster)-1:
-                gate = cluster[i]
-                net = gate.output[1]
-                cluster[i+1].inputs[list(cluster[i+1].inputs.keys())[0]] = net
-                i += 1
 
-            # Connect an input of the first gate to a FF.
-            randFF = random.choice(ffGates)
-            # print(randFF)
-            # logger.debug("cluster size: {}".format(len(cluster)))
-            # logger.debug("Cluster[0].name: {}, randFF.name: {}\n logic inputs:{}, ff outputs:{}".format(cluster[0].name, randFF.name, cluster[0].inputs, randFF.outputs))
-            cluster[0].inputs[list(cluster[0].inputs.keys())[0]] = randFF.output[1]
-
-            # Connect the output of the last gate in the cluster to `randFanout` FFs.
-            randFanout = int(random.gauss(fanout, 1))
-            net = cluster[-1].output[1]
-            for i in range(randFanout):
-                found = False
-                while not found:
-                    if len(freeFF) == 0:
-                        logger.warning("No more available inputs on FFs to connect the logic.")
-                        break
-                    candidate = random.choice(freeFF)
-                    if 0 in candidate.inputs.values():
-                        for pin in candidate.inputs.keys():
-                            if candidate.inputs[pin] == 0:
-                                candidate.inputs[pin] = net
-                                break
-                        found = True
-                    else:
-                        # logger.debug("Removing {} in FF connected to output of cluster".format(candidate.name))
-                        freeFF.remove(candidate)
+                    # logger.warning("No more FF available for cloud outputs connections.\n Creating a new FF.")
+                # Use the first pin available in the FF, we just don't care.
+                for pin in flipflop.inputs.keys():
+                    if flipflop.inputs[pin] == 0:
+                        flipflop.inputs[pin] = net
+                        ioCount[1] += 1
+                # If no more avaible inputs, remove from the "free" list.
+                if not 0 in flipflop.inputs.values():
+                    freeFF.remove(flipflop)
+        # For each gate in the first level, connect each input to a FF.
+        for instance in levels[0]:
+            for pin in instance.inputs.keys():
+                instance.inputs[pin] = random.choice(ffGates).output[1]
+                ioCount[0] += 1
+        logger.info("IO count for this cloud: {} (Rent's p = {})".format(ioCount, np.log(sum(ioCount)/3.7)))
 
 
 
+    # ###############################
+    # # Group logic gates in clusters
+    # #
+    # logger.info("Creating clusters of logic")
+    # with alive_bar() as bar:
+    #     while len(logicGates) > 0:
+    #         if len(logicGates) > CPDensity:
+    #             clusterSize = max([2,int(CPDensity - abs(random.gauss(0,CPDensity/2)))])
+    #             cluster = random.sample(logicGates, k=clusterSize)
+    #         else:
+    #             cluster = logicGates[:]
+    #         # logger.debug("New run: cluster = {}".format(clusterSize))
+    #         bar()
 
-            ###################################
-            # Interconnect logic inside cluster
-            # Once a gate has its inputs fully connected, remove it from the cluster.
-            i = 0
-            while i < len(cluster):
-                gate = cluster[i]
-                randFanout = int(random.gauss(fanout, 1)) - 1 # '-1' as they are already daisy chained.
-                # Get the net connected to the output of the gate
-                net = gate.output[1]
-                for j in range(randFanout):
-                    found = False
-                    while not found:
-                        if len(cluster) == 0:
-                            break
-                        candidate = random.choice(cluster)
-                        if 0 in candidate.inputs.values():
-                            for pin in candidate.inputs.keys():
-                                if candidate.inputs[pin] == 0:
-                                    candidate.inputs[pin] = net
-                                    break
-                            found = True
-                        else:
-                            # Decrement counter as we remove an element *before* the current index.
-                            if cluster.index(candidate) <= i:
-                                i -= 1
-                            cluster.remove(candidate)
-                i += 1
-            # If the cluster is not empty, need to connect the orphan inputs.
-            while len(cluster) > 0:
-                gateDonnor = random.choice(cluster) # Output net donnor
-                net = gateDonnor.output[1]
-                found = False
-                while not found:
-                    if len(cluster) == 0:
-                        break
-                    receiverGate = random.choice(cluster) # FF receiving said output to one of its free inputs
-                    if 0 in receiverGate.inputs.values():
-                        for pin in receiverGate.inputs.keys():
-                            if receiverGate.inputs[pin] == 0:
-                                receiverGate.inputs[pin] = net
-                                break
-                        found = True
-                    else:
-                        cluster.remove(receiverGate)
+    #         # Remove used gates from further consideration
+    #         for gate in cluster:
+    #             logicGates.remove(gate)
+
+    #         # First, daisy chain all the gates to build the CP.
+    #         i = 0
+    #         while i < len(cluster)-1:
+    #             gate = cluster[i]
+    #             net = gate.output[1]
+    #             cluster[i+1].inputs[list(cluster[i+1].inputs.keys())[0]] = net
+    #             i += 1
+
+    #         # Connect an input of the first gate to a FF.
+    #         randFF = random.choice(ffGates)
+    #         # print(randFF)
+    #         # logger.debug("cluster size: {}".format(len(cluster)))
+    #         # logger.debug("Cluster[0].name: {}, randFF.name: {}\n logic inputs:{}, ff outputs:{}".format(cluster[0].name, randFF.name, cluster[0].inputs, randFF.outputs))
+    #         cluster[0].inputs[list(cluster[0].inputs.keys())[0]] = randFF.output[1]
+
+    #         # Connect the output of the last gate in the cluster to `randFanout` FFs.
+    #         randFanout = int(random.gauss(fanout, 1))
+    #         net = cluster[-1].output[1]
+    #         for i in range(randFanout):
+    #             found = False
+    #             while not found:
+    #                 if len(freeFF) == 0:
+    #                     logger.warning("No more available inputs on FFs to connect the logic.")
+    #                     break
+    #                 candidate = random.choice(freeFF)
+    #                 if 0 in candidate.inputs.values():
+    #                     for pin in candidate.inputs.keys():
+    #                         if candidate.inputs[pin] == 0:
+    #                             candidate.inputs[pin] = net
+    #                             break
+    #                     found = True
+    #                 else:
+    #                     # logger.debug("Removing {} in FF connected to output of cluster".format(candidate.name))
+    #                     freeFF.remove(candidate)
+
+
+
+
+    #         ###################################
+    #         # Interconnect logic inside cluster
+    #         # Once a gate has its inputs fully connected, remove it from the cluster.
+    #         i = 0
+    #         while i < len(cluster):
+    #             gate = cluster[i]
+    #             randFanout = int(random.gauss(fanout, 1)) - 1 # '-1' as they are already daisy chained.
+    #             # Get the net connected to the output of the gate
+    #             net = gate.output[1]
+    #             for j in range(randFanout):
+    #                 found = False
+    #                 while not found:
+    #                     if len(cluster) == 0:
+    #                         break
+    #                     candidate = random.choice(cluster)
+    #                     if 0 in candidate.inputs.values():
+    #                         for pin in candidate.inputs.keys():
+    #                             if candidate.inputs[pin] == 0:
+    #                                 candidate.inputs[pin] = net
+    #                                 break
+    #                         found = True
+    #                     else:
+    #                         # Decrement counter as we remove an element *before* the current index.
+    #                         if cluster.index(candidate) <= i:
+    #                             i -= 1
+    #                         cluster.remove(candidate)
+    #             i += 1
+    #         # If the cluster is not empty, need to connect the orphan inputs.
+    #         while len(cluster) > 0:
+    #             gateDonnor = random.choice(cluster) # Output net donnor
+    #             net = gateDonnor.output[1]
+    #             found = False
+    #             while not found:
+    #                 if len(cluster) == 0:
+    #                     break
+    #                 receiverGate = random.choice(cluster) # FF receiving said output to one of its free inputs
+    #                 if 0 in receiverGate.inputs.values():
+    #                     for pin in receiverGate.inputs.keys():
+    #                         if receiverGate.inputs[pin] == 0:
+    #                             receiverGate.inputs[pin] = net
+    #                             break
+    #                     found = True
+    #                 else:
+    #                     cluster.remove(receiverGate)
 
 
     logger.debug("Free FFs after logic clustering: {}/{}".format(len(freeFF), len(ffGates)))
@@ -453,7 +585,8 @@ def generateNetlist(name, stdCells, distribution, fanout, ngates):
         found = False
         while not found:
             if len(freeFF) == 0:
-                logger.warning("No more available inputs on FFs to connect I/O.")
+                logger.error("No more available inputs on FFs to connect I/O. Aborting")
+                sys.exit()
                 break
             candidate = random.choice(freeFF)
             if 0 in candidate.inputs.values():
