@@ -191,7 +191,7 @@ def distributionFromFile(inFile):
 
     return distribution
 
-def regenFF(distribution, stdCells, ID):
+def regenFF(distribution, stdCells, ffGates, freeFF):
     """
     Regenerate a new FF based on the given distribution.
 
@@ -203,8 +203,6 @@ def regenFF(distribution, stdCells, ID):
         {cell name : weight}
     stdCells : dict
         {cell name : StdCell}
-    ID : int
-        ID of the instance, appended to its name.
 
     Return:
     -------
@@ -218,7 +216,7 @@ def regenFF(distribution, stdCells, ID):
         for pin in cell.pins.values():
             if pin.type == "CLOCK":
                 found = True
-    name = cell.name.lower() + "_" + str(ID)
+    name = cell.name.lower() + "_" + str(len(ffGates))
     instance = Instance(name, cell=cell)
     #############################################################
     # Extract and list all pins of the stdcell into the instance.
@@ -236,6 +234,11 @@ def regenFF(distribution, stdCells, ID):
             logger.error("Unexpected pin dir: {} for pin {} in cell {}\n Aborting".format(pin.dir, pin.name, cell.name))
             sys.exit()
 
+    ffGates.append(instance)
+    freeFF.append(instance)
+    # logger.debug("freeFF in regenFF: {}".format(freeFF))
+    # logger.debug("Instance address in regen: {}".format(instance))
+    
     return instance
 
 
@@ -313,11 +316,12 @@ def generateNetlist(name, stdCells, distribution, fanout, ngates):
 
     logicGates = list()
     ffGates = list()
+    freeFF = list()
 
 
     ###################
     # Prepare instances
-    # Assign them there stand cell and create a net at the output.
+    # Assign them their stand cell and create a net at the output.
     with alive_bar(len(cells)) as bar:
         for i, c in enumerate(cells):
             bar()
@@ -361,7 +365,78 @@ def generateNetlist(name, stdCells, distribution, fanout, ngates):
             netlist.instances.append(instance)
     rentParameterT = sum([len(x.inputs)+1 for x in logicGates])/len(logicGates)
     logger.info("Rent's t parameter: {}".format(rentParameterT))
-    freeFF = ffGates[:]
+    # freeFF = ffGates[:]
+
+
+
+
+
+
+
+
+    ######################################################
+    # Create input I/O for unassigned inputs in instances.
+
+    # T = Number of I/O
+    # rent = Rent's t parameter, i.e. the average number of terminals per gate.
+    # p = Rent's exponent.
+    p = 0.4
+    rent = rentParameterT
+    T = rent * (ngates ** p)
+    logger.info("IO Terminals (Rent): {}".format(T))
+    for i in range(int(T)):
+        netName = "io_"+str(i)
+        # inIONet = Net(netName)
+        # inIONet.dir = "input"
+        # instance.inputs[pin] = inIONet
+        # netlist.nets.append(inIONet)
+
+        inIOPin = Pin(netName)
+        inIOPin.dir = random.choice(["INPUT", "OUTPUT"])
+        inIOPin.type = "SIGNAL"
+        netlist.pins.append(inIOPin)
+
+
+    # Start with the input pins first
+    for pin in netlist.pins:
+        net = Net(pin.name)
+        net.dir = "input"
+        netlist.nets.append(net) # Necessary?
+        # For each input pin, create a new FF if necessary."
+        if pin.dir == "INPUT":
+            if len(freeFF) == 0:
+                candidate = regenFF(distribution, stdCells, ffGates, freeFF)
+                # logger.debug("freeFF in pin assignment: {}".format(freeFF))
+                # logger.debug("instance address: {}".format(instance))
+            else:
+                candidate = random.choice(freeFF)
+            for pin in candidate.inputs.keys():
+                if candidate.inputs[pin] == 0:
+                    candidate.inputs[pin] = net
+                    break
+            # logger.debug("instance inputs: {}".format(candidate.inputs))
+            # logger.debug("instance in freeFF inputs: {}".format(freeFF[0].inputs))
+            # sys.exit()
+            if not 0 in candidate.inputs.values():
+                freeFF.remove(candidate)
+
+    # Then manage the output, as we don't want to have a single FF connecting an input to an output.
+    for pin in netlist.pins:
+        net = Net(pin.name)
+        net.dir = "output"
+        netlist.nets.append(net) # Necessary?
+        # For each output pin, create a new FF to connect."
+        if pin.dir == "OUTPUT":
+            candidate = regenFF(distribution, stdCells, ffGates, freeFF)
+            candidate.output[0] = pin.name
+            candidate.output[1] = net
+    sys.exit()
+
+    ##############################
+    # XXXXXXXXXXXXXXXXXXXXXXXXXX #
+    ##############################
+
+
 
     ###############################
     # Generate clock for Flip-Flops
@@ -489,48 +564,7 @@ def generateNetlist(name, stdCells, distribution, fanout, ngates):
 
     logger.debug("Free FFs after logic clustering: {}/{}".format(len(freeFF), len(ffGates)))
 
-    ######################################################
-    # Create input I/O for unassigned inputs in instances.
 
-    # T = Number of I/O
-    # rent = Rent's t parameter, i.e. the average number of terminals per gate.
-    # p = Rent's exponent.
-    p = 0.4
-    rent = rentParameterT
-    T = rent * (ngates ** p)
-    logger.info("IO Terminals (Rent): {}".format(T))
-    for i in range(int(T)):
-        netName = "io_"+str(i)
-        # inIONet = Net(netName)
-        # inIONet.dir = "input"
-        # instance.inputs[pin] = inIONet
-        # netlist.nets.append(inIONet)
-
-        inIOPin = Pin(netName)
-        inIOPin.dir = "INPUT"
-        inIOPin.type = "SIGNAL"
-        netlist.pins.append(inIOPin)
-
-    # Connect the IO pins to free FFs.
-    for pin in netlist.pins:
-        net = Net(pin.name)
-        net.dir = "input"
-        found = False
-        while not found:
-            if len(freeFF) == 0:
-                logger.error("No more available inputs on FFs to connect I/O. Aborting")
-                sys.exit()
-                break
-            candidate = random.choice(freeFF)
-            if 0 in candidate.inputs.values():
-                for pin in candidate.inputs.keys():
-                    if candidate.inputs[pin] == 0:
-                        candidate.inputs[pin] = net
-                        break
-                found = True
-            else:
-                # logger.debug("Removing {} in FF I/Os".format(candidate.name))
-                freeFF.remove(candidate)
 
     # Interconnect the remaining FFs into shift registers and the like.
     logger.debug("Remaining FFs: {}".format(len(freeFF)))
