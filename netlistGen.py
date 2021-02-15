@@ -249,6 +249,7 @@ def regenFF(distribution, stdCells, ID):
     netlist.nets.append(net)
 
 
+
 def generateNetlist(name, stdCells, distribution, fanout, ngates):
     """
     1. Create *ngates* based on *distribution*.
@@ -276,7 +277,7 @@ def generateNetlist(name, stdCells, distribution, fanout, ngates):
     ######################
     # Some more parameters
     CPDensity = 30 # Critical Path (CP) Density: Maximum amount of logic gates between two flip-flops (FFs).
-
+    averageCP = 10
     ######################
 
     # Updated idea: create 'clusters' of logic up to `CPDensity`.
@@ -358,6 +359,8 @@ def generateNetlist(name, stdCells, distribution, fanout, ngates):
                 sys.exit()
 
             netlist.instances.append(instance)
+    rentParameterT = sum([len(x.inputs)+1 for x in logicGates])/len(logicGates)
+    logger.info("Rent's t parameter: {}".format(rentParameterT))
     freeFF = ffGates[:]
 
     ###############################
@@ -398,6 +401,7 @@ def generateNetlist(name, stdCells, distribution, fanout, ngates):
         # Slice the could into levels
         while len(cloud) > 0:
             levelSize = min([random.randint(1, 10), len(cloud)])
+            # levelSize = min([int(random.gauss(cloudSize/averageCP,0.1*cloudSize/averageCP)), len(cloud)])
             level = random.sample(cloud, k=levelSize)
             for gate in level:
                 cloud.remove(gate)
@@ -424,10 +428,10 @@ def generateNetlist(name, stdCells, distribution, fanout, ngates):
                     flipflop = regenFF(distribution, stdCells, ID=len(ffGates))
                     netlist.instances.append(flipflop)
                     # Create a net for the output
-                    net = Net(flipflop.name + "_net")
-                    net.dir = "wire" # not connected to an I/O pin yet.
-                    flipflop.output[1] = net
-                    netlist.nets.append(net)
+                    netFF = Net(flipflop.name + "_net")
+                    netFF.dir = "wire" # not connected to an I/O pin yet.
+                    flipflop.output[1] = netFF
+                    netlist.nets.append(netFF)
                     
                     ffGates.append(flipflop)
                     netlist.instances.append(flipflop)
@@ -440,6 +444,7 @@ def generateNetlist(name, stdCells, distribution, fanout, ngates):
                     if flipflop.inputs[pin] == 0:
                         flipflop.inputs[pin] = net
                         ioCount[1] += 1
+                        break
                 # If no more avaible inputs, remove from the "free" list.
                 if not 0 in flipflop.inputs.values():
                     freeFF.remove(flipflop)
@@ -448,6 +453,37 @@ def generateNetlist(name, stdCells, distribution, fanout, ngates):
             for pin in instance.inputs.keys():
                 instance.inputs[pin] = random.choice(ffGates).output[1]
                 ioCount[0] += 1
+        # Each output of the last level needs to be connected to a FF
+        for instance in levels[-1]:
+            net = instance.output[1]
+
+            if len(freeFF) > 0:
+                flipflop = random.choice(freeFF)
+            else:
+                flipflop = regenFF(distribution, stdCells, ID=len(ffGates))
+                netlist.instances.append(flipflop)
+                # Create a net for the output
+                netFF = Net(flipflop.name + "_net")
+                netFF.dir = "wire" # not connected to an I/O pin yet.
+                flipflop.output[1] = netFF
+                netlist.nets.append(netFF)
+                
+                ffGates.append(flipflop)
+                netlist.instances.append(flipflop)
+                freeFF.append(flipflop)
+
+
+                # logger.warning("No more FF available for cloud outputs connections.\n Creating a new FF.")
+            # Use the first pin available in the FF, we just don't care.
+            for pin in flipflop.inputs.keys():
+                if flipflop.inputs[pin] == 0:
+                    flipflop.inputs[pin] = net
+                    ioCount[1] += 1
+                    break
+            # If no more avaible inputs, remove from the "free" list.
+            if not 0 in flipflop.inputs.values():
+                freeFF.remove(flipflop)
+
         logger.info("IO count for this cloud: {} (Rent's p = {})".format(ioCount, np.log(sum(ioCount)/3.7)))
 
 
@@ -563,7 +599,7 @@ def generateNetlist(name, stdCells, distribution, fanout, ngates):
     # rent = Rent's t parameter, i.e. the average number of terminals per gate.
     # p = Rent's exponent.
     p = 0.4
-    rent = 3
+    rent = rentParameterT
     T = rent * (ngates ** p)
     logger.info("IO Terminals (Rent): {}".format(T))
     for i in range(int(T)):
